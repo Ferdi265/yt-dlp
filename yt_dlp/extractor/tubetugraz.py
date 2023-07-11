@@ -15,11 +15,41 @@ class TubeTuGrazBaseIE(InfoExtractor):
     _FORMAT_TYPES = ('presentation', 'presenter')
 
     def _perform_login(self, username, password):
-        urlh = self._request_webpage(
+        content, urlh = self._download_webpage_handle(
             'https://tube.tugraz.at/Shibboleth.sso/Login?target=/paella/ui/index.html',
             None, fatal=False, note='downloading login page', errnote='unable to fetch login page')
         if not urlh:
             return
+
+        self.report_warning(f"debug: login page reply url: {urlh.url}")
+
+        saml_url = self._html_search_regex(
+            r'<form name="saml-post-binding" method="post" action="([^"]*)"[^>]*>',
+            content, 'SAML request form', default=None)
+        if saml_url is not None:
+            saml_request = self._html_search_regex(
+                r'<input type="hidden" name="SAMLRequest" value="([^"]*)"[^>]*>',
+                content, 'SAML request', default=None)
+            saml_relaystate = self._html_search_regex(
+                r'<input type="hidden" name="RelayState" value="([^"]*)"[^>]*>',
+                content, 'SAML relay state', default=None)
+            if saml_request is None or saml_relaystate is None:
+                self.report_warning("unable to login: did not find SAML request")
+
+            content, urlh = self._download_webpage_handle(
+                saml_url, None, fatal=False, headers={'referer': urlh.url},
+                note='downloading secondary login page', errnote='unable to fetch login page',
+                data=urlencode_postdata({
+                    'SAMLRequest': saml_request,
+                    'RelayState': saml_relaystate,
+                    'submit': 'Weiter'
+                }))
+            if not urlh:
+                return
+
+            self.report_warning(f"debug: secondary login page reply url: {urlh.url}")
+
+        self.report_warning(f"debug: attempting to login: {username = !r}, {password = !r}")
 
         content, urlh = self._download_webpage_handle(
             urlh.url, None, fatal=False, headers={'referer': urlh.url},
@@ -36,8 +66,12 @@ class TubeTuGrazBaseIE(InfoExtractor):
         if not self._html_search_regex(
                 r'<p\b[^>]*>(Bitte geben Sie einen OTP-Wert ein:)</p>',
                 content, 'TFA prompt', default=None):
+            self.report_warning(f"debug: {content}")
             self.report_warning('unable to login: incorrect password')
             return
+
+        tfa = self._get_tfa_info()
+        self.report_warning(f"debug: attempting to login: {tfa = !r}")
 
         content, urlh = self._download_webpage_handle(
             urlh.url, None, fatal=False, headers={'referer': urlh.url},
@@ -45,11 +79,12 @@ class TubeTuGrazBaseIE(InfoExtractor):
             data=urlencode_postdata({
                 'lang': 'de',
                 '_eventId_proceed': '',
-                'j_tokenNumber': self._get_tfa_info(),
+                'j_tokenNumber': tfa,
             }))
         if not urlh or urlh.url == 'https://tube.tugraz.at/paella/ui/index.html':
             return
 
+        self.report_warning(f"debug: login attempt reply url: {urlh.url}")
         self.report_warning('unable to login: incorrect TFA code')
 
     def _extract_episode(self, episode_info):
